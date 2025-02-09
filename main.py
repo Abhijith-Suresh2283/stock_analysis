@@ -8,21 +8,37 @@ from keras.models import load_model
 from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
 import pandas_ta as ta
+from datetime import datetime, timedelta
 
 # Streamlit app setup
 st.title('Stock Dashboard')
 ticker = st.sidebar.text_input('Ticker', value='AAPL')
-start_date = st.sidebar.date_input('Start Date', value=pd.to_datetime('2010-01-01'))
-end_date = st.sidebar.date_input('End Date')
 
-# Validate inputs
-if ticker and start_date < end_date:
-    # Fetch stock data from yfinance
+if ticker:
+    # Calculate dates
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=365)  # Get 1 year of historical data
+
+    # Fetch stock data
     data = yf.download(ticker, start=start_date, end=end_date)
     
     if not data.empty:
+        # Get current stock price
+        current_price = data['Adj Close'][-1]
+        
+        # Display current stock price with styling
+        st.markdown("""
+        <style>
+        .big-font {
+            font-size:24px !important;
+            font-weight:bold;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        st.markdown(f"<p class='big-font'>{ticker} Current Price: ${current_price:.2f}</p>", unsafe_allow_html=True)
+
         # Display stock price chart
-        fig = px.line(data, x=data.index, y='Adj Close', title=ticker)
+        fig = px.line(data, x=data.index, y='Adj Close', title=f'{ticker} Stock Price')
         st.plotly_chart(fig)
 
         # Tabs setup
@@ -45,7 +61,7 @@ if ticker and start_date < end_date:
             st.header(f'News of {ticker}')
             sn = StockNews(ticker, save_news=False)
             df_news = sn.read_rss()
-            for i in range(min(10, len(df_news))):  # Avoid index errors
+            for i in range(min(10, len(df_news))):
                 st.subheader(f'News {i+1}')
                 st.write(df_news['published'][i])
                 st.write(df_news['title'][i])
@@ -85,7 +101,6 @@ if ticker and start_date < end_date:
                         elif technical_indicator == 'Bollinger Bands':
                             indicator = method(data['Close'])
                         
-                        # Ensure the indicator result is a DataFrame
                         if isinstance(indicator, pd.DataFrame):
                             indicator_df = indicator
                         else:
@@ -101,84 +116,68 @@ if ticker and start_date < end_date:
                     st.error(f"Indicator {technical_indicator} not found.")
             else:
                 st.error("Missing columns in the data for technical analysis.")
-        
         # Stock Price Prediction tab
         with prediction:
             st.subheader("Stock Price Prediction")
 
-            # Use the same ticker, start date, and end date as above
-            df = yf.download(ticker, start=start_date, end=end_date)
+            if len(data) < 100:
+                st.error("Not enough data for prediction. Please try again later.")
+            else:
+                # Prepare data for prediction
+                close_prices = data['Close'].values.reshape(-1, 1)
+                
+                # Scale the data
+                scaler = MinMaxScaler(feature_range=(0, 1))
+                scaled_data = scaler.fit_transform(close_prices)
 
-            st.subheader(f'Data from {start_date} to {end_date}')
-            st.write(df.describe())
+                # Prepare sequences for prediction
+                sequence_length = 100
+                sequences = []
+                for i in range(len(scaled_data) - sequence_length):
+                    sequences.append(scaled_data[i:(i + sequence_length)])
+                sequences = np.array(sequences)
 
-            st.subheader('Closing price vs time chart')
-            fig = plt.figure(figsize=(12, 6))
-            plt.plot(df['Close'])
-            st.pyplot(fig)
+                # Load the model
+                model = load_model('keras_model.h5')
 
-            st.subheader('Closing price vs time chart with 100 MA')
+                # Prepare the last sequence for prediction
+                last_sequence = scaled_data[-100:]
+                last_sequence = last_sequence.reshape(1, 100, 1)
 
-            ma100 = df['Close'].rolling(100).mean()
-            fig = plt.figure(figsize=(12, 6))
-            plt.plot(ma100, label='100 MA')
-            plt.plot(df['Close'], label='Close')
-            plt.legend()
-            st.pyplot(fig)
+                # Make prediction for next month
+                predicted_scaled = model.predict(last_sequence)
+                predicted_price = scaler.inverse_transform(predicted_scaled)[0][0]
 
-            st.subheader('Closing price vs time chart with 100 MA and 200 MA')
-            ma100 = df['Close'].rolling(100).mean()
-            ma200 = df['Close'].rolling(200).mean()
-            fig = plt.figure(figsize=(12, 6))
-            plt.plot(ma100, 'r', label='100 MA')
-            plt.plot(ma200, 'g', label='200 MA')
-            plt.plot(df['Close'], 'b', label='Close')
-            plt.legend()
-            st.pyplot(fig)
+                # Calculate price change
+                price_change = predicted_price - current_price
+                price_change_percentage = (price_change / current_price) * 100
 
-            data_training = pd.DataFrame(df['Close'][0:int(len(df) * 0.70)])
-            data_testing = pd.DataFrame(df['Close'][int(len(df) * 0.70):int(len(df))])
-
-            scaler = MinMaxScaler(feature_range=(0, 1))
-            data_training_array = scaler.fit_transform(data_training.values.reshape(-1, 1))
-
-            x_train = []
-            y_train = []
-
-            for i in range(100, data_training_array.shape[0]):
-                x_train.append(data_training_array[i-100:i])
-                y_train.append(data_training_array[i, 0])
-            x_train, y_train = np.array(x_train), np.array(y_train)
-
-            model = load_model('keras_model.h5')
-
-            past_100_days = data_training.tail(100)
-            final_df = pd.concat([past_100_days, data_testing], ignore_index=True)
-            input_data = scaler.fit_transform(final_df.values.reshape(-1, 1))
-
-            x_test = []
-            y_test = []
-
-            for i in range(100, input_data.shape[0]):
-                x_test.append(input_data[i-100:i])
-                y_test.append(input_data[i, 0])
-
-            x_test, y_test = np.array(x_test), np.array(y_test)
-            y_predicted = model.predict(x_test)
-            scale_factor = 1 / scaler.scale_[0]
-            y_predicted = y_predicted * scale_factor
-            y_test = y_test * scale_factor
-
-            st.subheader('Prediction vs Original')
-            fig = plt.figure(figsize=(12, 6))
-            plt.plot(y_test, 'b', label='Original Price')
-            plt.plot(y_predicted, 'r', label='Predicted Price')
-            plt.xlabel('Time')
-            plt.ylabel('Price')
-            plt.legend()
-            st.pyplot(fig)
+                future_date = (end_date + timedelta(days=30)).strftime('%Y-%m-%d')
+                
+                # Display prediction analysis
+                st.subheader('Price Prediction Analysis')
+                
+                # Create a colored box based on the prediction
+                if price_change > 0:
+                    st.markdown(f"""
+                        <div style='background-color: #90EE90; padding: 20px; border-radius: 5px;'>
+                            <h3>📈 Price Expected to Increase</h3>
+                            <p>Current Price: ${current_price:.2f}</p>
+                            <p>Predicted Price ({future_date}): ${predicted_price:.2f}</p>
+                            <p>The stock price is predicted to increase by {abs(price_change_percentage):.2f}% in the next month.</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                        <div style='background-color: #FFB6C0; padding: 20px; border-radius: 5px;'>
+                            <h3>📉 Price Expected to Decrease</h3>
+                            <p>Current Price: ${current_price:.2f}</p>
+                            <p>Predicted Price ({future_date}): ${predicted_price:.2f}</p>
+                            <p>The stock price is predicted to decrease by {abs(price_change_percentage):.2f}% in the next month.</p>
+                        </div>
+                        """, unsafe_allow_html=True)
 
     else:
-        st.write("No data found for the given ticker and date range.")
+        st.write("No data found for the given ticker.")
 else:
-    st.write("Please enter a valid ticker and ensure the start date is before the end date.")
+    st.write("Please enter a valid ticker.")
